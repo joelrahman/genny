@@ -25,6 +25,15 @@ var header = []byte(`
 
 `)
 
+var ctypes = map[string]string{
+	"float64": "C.double",
+	"float32": "C.float",
+	"int32":   "C.int",
+	"uint32":  "C.uint",
+	"int64":   "C.long",
+	"uint64":  "C.ulong",
+}
+
 var (
 	packageKeyword = []byte("package")
 	importKeyword  = []byte("import")
@@ -34,14 +43,16 @@ var (
 	genericPackage = "generic"
 	genericType    = "generic.Type"
 	genericNumber  = "generic.Number"
+	genericCType   = "generic.CType"
+	genericCNumber = "generic.CNumber"
 	linefeed       = "\r\n"
 )
 var unwantedLinePrefixes = [][]byte{
 	[]byte("//go:generate genny "),
 }
 
-func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]string) ([]byte, error) {
-
+func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]string) ([]byte, bool, error) {
+	usedC := false
 	// ensure we are at the beginning of the file
 	in.Seek(0, os.SEEK_SET)
 
@@ -49,7 +60,7 @@ func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]stri
 	fs := token.NewFileSet()
 	file, err := parser.ParseFile(fs, filename, in, 0)
 	if err != nil {
-		return nil, &errSource{Err: err}
+		return nil, false, &errSource{Err: err}
 	}
 
 	// make sure every generic.Type is represented in the types
@@ -67,7 +78,11 @@ func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]stri
 					if name, ok := tt.X.(*ast.Ident); ok {
 						if name.Name == genericPackage {
 							if _, ok := typeSet[ts.Name.Name]; !ok {
-								return nil, &errMissingSpecificType{GenericType: ts.Name.Name}
+								if ts.Name.Name[0] == 'C' {
+									if _, ok = typeSet[ts.Name.Name[1:]]; !ok {
+										return nil, false, &errMissingSpecificType{GenericType: ts.Name.Name}
+									}
+								}
 							}
 						}
 					}
@@ -88,7 +103,8 @@ func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]stri
 		l := scanner.Text()
 
 		// does this line contain generic.Type?
-		if strings.Contains(l, genericType) || strings.Contains(l, genericNumber) {
+		if strings.Contains(l, genericType) || strings.Contains(l, genericNumber) ||
+			strings.Contains(l, genericCType) || strings.Contains(l, genericCNumber) {
 			comment = ""
 			continue
 		}
@@ -111,7 +127,14 @@ func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]stri
 							// if this isn't an exact match
 							if i > 0 && isAlphaNumeric(rune(word[i-1])) || i < len(word)-len(t) && isAlphaNumeric(rune(word[i+len(t)])) {
 								// replace the word with a capitolized version
-								word = strings.Replace(word, t, wordify(specificType, unicode.IsUpper(rune(strings.TrimLeft(word, "*&")[0]))), 1)
+								if UseCType(word, t, i) {
+									word = strings.Replace(word, "C"+t, ctypes[specificType], 1)
+									usedC = true
+								} else {
+									periodIdx := strings.Index(word, ".")
+									exported := unicode.IsUpper(rune(strings.TrimLeft(word[periodIdx+1:], "*&(")[0]))
+									word = strings.Replace(word, t, wordify(specificType, exported), 1)
+								}
 							} else {
 								// replace the word as is
 								word = strings.Replace(word, t, specificType, 1)
@@ -146,7 +169,14 @@ func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]stri
 	}
 
 	// write it out
-	return buf.Bytes(), nil
+	return buf.Bytes(), usedC, nil
+}
+
+func UseCType(word, t string, i int) bool {
+	if i > 0 && word[i-1] == 'C' && (len(word) == (len(t)+i) || !isAlphaNumeric(rune(word[i+len(t)]))) {
+		return (i == 1) || !isAlphaNumeric(rune(word[i-2]))
+	}
+	return false
 }
 
 // Generics parses the source file and generates the bytes replacing the
@@ -154,15 +184,16 @@ func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]stri
 func Generics(filename, pkgName string, in io.ReadSeeker, typeSets []map[string]string) ([]byte, error) {
 
 	totalOutput := header
-
+	needC := false
 	for _, typeSet := range typeSets {
 
 		// generate the specifics
-		parsed, err := generateSpecific(filename, in, typeSet)
+		parsed, usedC, err := generateSpecific(filename, in, typeSet)
 		if err != nil {
 			return nil, err
 		}
 
+		needC = needC || usedC
 		totalOutput = append(totalOutput, parsed...)
 
 	}
@@ -170,6 +201,7 @@ func Generics(filename, pkgName string, in io.ReadSeeker, typeSets []map[string]
 	// clean up the code line by line
 	packageFound := false
 	insideImportBlock := false
+	packageNumber := 0
 	var cleanOutputLines []string
 	scanner := bufio.NewScanner(bytes.NewReader(totalOutput))
 	for scanner.Scan() {
@@ -179,10 +211,13 @@ func Generics(filename, pkgName string, in io.ReadSeeker, typeSets []map[string]
 			if bytes.HasSuffix(scanner.Bytes(), closeBrace) {
 				insideImportBlock = false
 			}
-			continue
+			if packageNumber > 1 {
+				continue
+			}
 		}
 
 		if bytes.HasPrefix(scanner.Bytes(), packageKeyword) {
+			packageNumber++
 			if packageFound {
 				continue
 			} else {
@@ -192,7 +227,9 @@ func Generics(filename, pkgName string, in io.ReadSeeker, typeSets []map[string]
 			if bytes.HasSuffix(scanner.Bytes(), openBrace) {
 				insideImportBlock = true
 			}
-			continue
+			if packageNumber > 1 {
+				continue
+			}
 		}
 
 		// check all unwantedLinePrefixes - and skip them
@@ -209,23 +246,28 @@ func Generics(filename, pkgName string, in io.ReadSeeker, typeSets []map[string]
 		}
 
 		cleanOutputLines = append(cleanOutputLines, line(scanner.Text()))
+		if packageFound && needC {
+			cleanOutputLines = append(cleanOutputLines, "import \"C\"\n")
+			needC = false
+		}
+
 	}
 
 	cleanOutput := strings.Join(cleanOutputLines, "")
 
 	output := []byte(cleanOutput)
-	var err error
 
 	// change package name
 	if pkgName != "" {
 		output = changePackage(bytes.NewReader([]byte(output)), pkgName)
 	}
 	// fix the imports
+	var err error
 	output, err = imports.Process(filename, output, nil)
+
 	if err != nil {
 		return nil, &errImports{Err: err}
 	}
-
 	return output, nil
 }
 
