@@ -28,6 +28,8 @@ var header = []byte(`
 var ctypes = map[string]string{
 	"float64": "C.double",
 	"float32": "C.float",
+	"int":     "C.int",
+	"uint":    "C.uint",
 	"int32":   "C.int",
 	"uint32":  "C.uint",
 	"int64":   "C.long",
