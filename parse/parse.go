@@ -133,8 +133,17 @@ func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]stri
 									word = strings.Replace(word, "C"+t, ctypes[specificType], 1)
 									usedC = true
 								} else {
-									periodIdx := strings.Index(word, ".")
-									exported := unicode.IsUpper(rune(strings.TrimLeft(word[periodIdx+1:], "*&(")[0]))
+									trimmed := word
+									for {
+										periodIdx := strings.Index(trimmed, ".")
+										if periodIdx < 0 {
+											break
+										}
+										trimmed = trimmed[periodIdx+1:]
+									}
+									trimmed = strings.TrimLeft(trimmed, "*&(")
+									exported := unicode.IsUpper(rune(trimmed[0]))
+
 									word = strings.Replace(word, t, wordify(specificType, exported), 1)
 								}
 							} else {
