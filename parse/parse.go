@@ -53,7 +53,7 @@ var unwantedLinePrefixes = [][]byte{
 	[]byte("//go:generate genny "),
 }
 
-func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]string) ([]byte, bool, error) {
+func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]string, strip string) ([]byte, bool, error) {
 	usedC := false
 	// ensure we are at the beginning of the file
 	in.Seek(0, os.SEEK_SET)
@@ -142,6 +142,13 @@ func generateSpecific(filename string, in io.ReadSeeker, typeSet map[string]stri
 								word = strings.Replace(word, t, specificType, 1)
 							}
 
+							if (len(strip) > 0) && (i >= len(strip)) {
+								window := word[i-len(strip) : i]
+								if window == strip {
+									word = strings.Replace(word, strip, "", 1)
+									i = i - len(strip)
+								}
+							}
 						} else {
 							newLine = newLine + word + space
 							break
@@ -183,14 +190,14 @@ func UseCType(word, t string, i int) bool {
 
 // Generics parses the source file and generates the bytes replacing the
 // generic types for the keys map with the specific types (its value).
-func Generics(filename, pkgName string, in io.ReadSeeker, typeSets []map[string]string) ([]byte, error) {
+func Generics(filename, pkgName string, in io.ReadSeeker, typeSets []map[string]string, strip string) ([]byte, error) {
 
 	totalOutput := header
 	needC := false
 	for _, typeSet := range typeSets {
 
 		// generate the specifics
-		parsed, usedC, err := generateSpecific(filename, in, typeSet)
+		parsed, usedC, err := generateSpecific(filename, in, typeSet, strip)
 		if err != nil {
 			return nil, err
 		}
